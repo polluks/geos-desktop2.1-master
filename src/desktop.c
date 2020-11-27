@@ -25,20 +25,31 @@ struct window winPadBackground = {20,145,9,262};
 struct filehandle *curFileHandle;
 unsigned numFiles = 0;
 unsigned numSelected = 0;
-unsigned kbytesUsed = 0;
-unsigned kbytesfree = 0;
+unsigned long kbytesUsed = 0;
+unsigned long kbytesfree = 0;
 unsigned char datetime[19];
+unsigned char backColor = 0;
+
+const graphicStr clrScreen = {
+        MOVEPENTO(0,0),
+        NEWPATTERN(2),
+        RECTANGLETO(319,199),
+        GSTR_END };
 
 void main(void)
 {
-    initClock();
     initInputDriver();
     initIconTable();
 
-    DoMenu(&mainMenu);
+    // store for restore purpose
+    backColor = PEEK(0x8c00);
     
-    changeDevice(curDrive); //PEEK(0x8489));
+    drawScreen();
     
+    changeDevice(curDrive);
+    
+    initPrinterDriver();
+
     hook_into_system();
     MainLoop();
 };
@@ -66,6 +77,36 @@ void initInputDriver()
         GetFile(0,buffer,0,0,0);
 }
 
+void initPrinterDriver()
+{
+    // Loads and installs first printer driver on disk
+    // if none found, "not on disk"
+
+    unsigned char buffer[17];
+    const char notondisk[] = "NOT ON DISK";
+    unsigned char tmp;
+    unsigned char x;
+
+    SetDevice(8);
+    OpenDisk();
+    tmp = FindFTypes (buffer, PRINTER, 1, NULL);
+
+    LoadCharSet ((struct fontdesc *)(bsw_small));
+
+    if (tmp == 1)
+    {
+        x = centerOver(36, buffer);
+        PutString(buffer,177, x);
+    }
+    else
+    {
+        x = centerOver(36, notondisk);
+        PutString(notondisk,177, x); 
+    }
+
+    UseSystemFont();
+}
+
 void updateClock()
 {
     unsigned char strMonth[3];
@@ -81,17 +122,18 @@ void updateClock()
     
     hr = system_date.s_hour;
     
-    if(hr > 11)
+    if(hr > 12)
     {
-       datetime[16] = 'P';
-       hr = 24-hr;
+        hr = hr - 12;
+        datetime[16] = 'P';
     }
     else
+    {
+        if (hr==0) hr = 12;
         datetime[16] = 'A';
+    }
+        
 
-    if(hr == 0) 
-        hr = 12;           
-    
     itoa(system_date.s_month, (char *)strMonth, 10);
     itoa(system_date.s_day, (char *)strDay, 10);
     itoa(system_date.s_year, (char *)strYear, 10);
@@ -162,7 +204,7 @@ void drawPad()
     HorizontalLine(255, 29, 8, 263);
     HorizontalLine(255, 31, 8, 263);
     
-    HorizontalLine(255, 42, 8, 263);
+    HorizontalLine(255, 43, 8, 263);
 }
 
 void drawFooter(unsigned char showPagingTabs)
@@ -188,6 +230,16 @@ void drawFooter(unsigned char showPagingTabs)
     HorizontalLine(255, 144, 8, 263);
 }
 
+void drawScreen()
+{
+    FillRam (0x8c00, backColor, 1000);
+    GraphicsString(&clrScreen);
+    
+    DoMenu(&mainMenu);
+    initClock();
+    updateClock();   
+}
+
 void changeDevice(unsigned char deviceNumber)
 {      
     SetDevice(deviceNumber);
@@ -204,6 +256,7 @@ void changeDevice(unsigned char deviceNumber)
     {
         drawPad();
         drawFooter(TRUE);
+        maxPage = getPageCount();
 
         //GetPtrCurDkNm(currentDiskName);  this doesnt work
         //replaced with...
@@ -223,6 +276,9 @@ void changeDevice(unsigned char deviceNumber)
         
         initIconTable();
         updateDriveIcons();
+        
+        curPage = 1;
+        goPage(curPage);
         updateDirectory();
         DoIcons(myicontab);
     }
@@ -256,6 +312,31 @@ void updateDiskName()
     currentDiskName[z] = 0;
 }
 
+unsigned char goPage(unsigned char pageNumber)
+{
+    struct tr_se ts;
+
+    if(pageNumber > maxPage)
+        return 0;
+
+    curPage = 1;
+    
+    Get1stDirEntry();
+    ts.track = PEEK(0x8000);
+    ts.sector = PEEK(0x8001);
+
+    while(curPage != pageNumber)
+    {
+        ReadBuff(&ts);
+        ts.track = PEEK(0x8000);
+        ts.sector = PEEK(0x8001);
+
+        curPage++;
+    }
+    
+    return curPage;
+}
+
 void updateDirectory()
 {
     unsigned ctr = 0;
@@ -263,17 +344,19 @@ void updateDirectory()
     unsigned char eof = 0;
     unsigned tmp = 0;
     unsigned startPrint = 0;
+    
+    clearAllFileIcons();
 
-    if(curPage > maxPage)
-        curPage = 1;
-    else
-        r5 = tmpr5;
+    // GetNxtDirEntry() adds $20 to the current pointer, so
+    // we subtract $20 so that the pointer gives us the
+    // first file handle on this page
+    r5 = 0x8002 - 0x20;
     
     do
     {   
         curFileHandle = (curPage == 1 && ctr == 0 ? Get1stDirEntry() : GetNxtDirEntry());
-        asm("tya");
-        if(__A__ != 0)
+        
+        if(curFileHandle == NULL)
             break;
 
         if (curFileHandle->dostype != 0)
@@ -282,36 +365,34 @@ void updateDirectory()
             for(z=0; z<17; z++)
             {
                 if(curFileHandle->name[z] == 0xa0) break;
-                fileIconNames[ctr][z] = curFileHandle->name[z];
+                padIcons[ctr].filename[z] = curFileHandle->name[z];
             };
-            fileIconNames[ctr][z] = 0;
+
+            padIcons[ctr].filename[z] = 0;
 
             if(GetFHdrInfo(curFileHandle) ==0)
             {
                 //copy icon image data
                 for(z=0; z < 63; z++)
-                    fileIconImages[ctr][z+1] = fileHeader.icon_pic[z];
+                    padIcons[ctr].iconData[z+1] = fileHeader.icon_pic[z];
             }
             else
             {
                 //copy cbm file icon image data
                 for(z=0; z < 64; z++)
-                    fileIconImages[ctr][z] = cbmFileIcon[z];
+                    padIcons[ctr].iconData[z] = cbmFileIcon[z];
             }
 
             ctr++;
         } 
         else 
         {
-            if (curFileHandle->name[0] == 0)
-            {
-                // empty icon space
-                for(z=0; z < 63; z++)
-                    fileIconImages[ctr][z+1] = 0;
-                
-                fileIconNames[ctr][0] = 0;
-                ctr++;
-            }  
+            // empty icon space
+            for(z=0; z < 63; z++)
+                padIcons[ctr].iconData[z+1]  = 0;
+            
+            padIcons[ctr].filename[0] = 0;
+            ctr++;
         }
 
         tmpr5 = r5;
@@ -320,20 +401,23 @@ void updateDirectory()
 
     // Display icons and filenames
     // Desktop prints these in reverse order
-
+    
     LoadCharSet ((struct fontdesc *)(bsw_small));
     
     tmp = (ctr == 8 ? 7 : ctr);
     do
     {
-        updateFileIcon(tmp, fileIconImages[tmp]);
+        // stamp the icon to the pad
+        BitmapUp(&(padIcons[tmp].iconpic));
 
-        startPrint = centerOver(  (fileIcons[tmp].x*8 +fileIcons[tmp].width*8) - (fileIcons[tmp].width*8/2), fileIconNames[tmp]);
+        // calculate the starting point for the filename
+        // so that it is centered under the icon
+        startPrint = centerOver(  (padIcons[tmp].iconpic.x*8 +padIcons[tmp].iconpic.width*8) - (padIcons[tmp].iconpic.width*8/2), padIcons[tmp].filename);
 
         if(tmp < 4)
-            PutString(fileIconNames[tmp], 74, startPrint);               
+            PutString(padIcons[tmp].filename, 74, startPrint);               
         else
-            PutString(fileIconNames[tmp], 114, startPrint);  
+            PutString(padIcons[tmp].filename, 114, startPrint);  
         
         if(tmp == 0)
             break;
@@ -343,21 +427,23 @@ void updateDirectory()
     } while(TRUE);
     
     UseSystemFont();
-    PutDecimal(SET_LEFTJUST + SET_SURPRESS, curPage,  135, 135);
+    PutDecimal(SET_LEFTJUST + SET_SURPRESS, curPage,  135, 128);
+    PutString("of", 135, 135);
+    PutDecimal(SET_LEFTJUST + SET_SURPRESS, maxPage,  135, 147);
 }
 
 void updatePadHeader()
 {
-    unsigned blksfree = 0;
+    unsigned long blksfree = 0;
     unsigned long tmp = 0;
     unsigned startPrint = 0;
 
-    //GetDirHead();
+    GetDirHead();
 
-    r5 = 0x8200;
     blksfree = CalcBlksFree();
-    tmp = blksfree * 256;
-    kbytesfree = tmp/256;
+    tmp = r3;
+    kbytesfree = blksfree * 256 / 1000;
+    kbytesUsed = (tmp * 256 / 1000) - kbytesfree;
 
     numFiles = getFileCount();
 
@@ -365,19 +451,25 @@ void updatePadHeader()
 
     startPrint = centerOver(135, currentDiskName);
     PutString(currentDiskName, 27, startPrint);
-        
-    PutString(hdr1,39, 27);
-    PutDecimal(SET_LEFTJUST + SET_SURPRESS, numFiles,  39, 18);
     
-    PutString(hdr2,39, 68);
-    PutDecimal(SET_LEFTJUST + SET_SURPRESS, numSelected,  39, 64);
+    PutString(hdr1,39, 26);
+    PutDecimal(SET_LEFTJUST + SET_SURPRESS, numFiles,  39, 18);    
     
-    PutString(hdr3,39, 123);
-    PutDecimal(SET_LEFTJUST + SET_SURPRESS, kbytesUsed,  39, 118);
+    PutString(hdr2,39, 66);    
+    PutDecimal(SET_LEFTJUST + SET_SURPRESS, numSelected,  39, 62);
     
-    PutString(hdr4,39, 206);
-    PutDecimal(SET_LEFTJUST + SET_SURPRESS, kbytesfree, 39, 200);
+    PutString(hdr3,39, 126);
+    PutDecimal(SET_LEFTJUST + SET_SURPRESS, kbytesUsed,  39, 116);
     
+    PutString(hdr4,39, 196);
+    PutDecimal(SET_LEFTJUST + SET_SURPRESS, kbytesfree, 39, 190);
+
+}
+
+void updateNumSelected()
+{
+    PutString("  ", 39,62);
+    PutDecimal(SET_LEFTJUST + SET_SURPRESS, numSelected,  39, 62);
 }
 
 unsigned centerOver(unsigned x, unsigned char *text)
@@ -411,23 +503,38 @@ unsigned getFileCount()
             ctr++;              
         
         curFileHandle = GetNxtDirEntry();
-        asm("sty $02");
-        eof = PEEK(2);
         
-    } while (eof == 0);
-
-    maxPage = ctr / 8;
-
-    if(ctr % 8 != 0)
-        maxPage++;
+    } while (curFileHandle != NULL);
 
     return ctr;
 }
 
+unsigned char getPageCount()
+{
+    struct tr_se ts;
+    unsigned char pageCount;
 
+    curFileHandle = Get1stDirEntry();
+    ts.track = PEEK(0x8000);
+    ts.sector = PEEK(0x8001);
+    pageCount = 1;
+    
+    while(ts.track != 0)
+    {
+        ReadBuff(&ts);
+        ts.track = PEEK(0x8000);
+        ts.sector = PEEK(0x8001);
+        pageCount++;
+    };
+    
+    return pageCount;
+}
+
+#include "desktop-info.c"
 #include "desktop-icons.c"
 #include "desktop-vectors.c"
 #include "desktop-menu.c"
+
 
 
 

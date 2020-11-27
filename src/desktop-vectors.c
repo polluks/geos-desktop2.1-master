@@ -15,100 +15,68 @@ void remove_hook(void) {
 
 void newOtherPressVectorHandler(void) 
 {
-    unsigned char pgNext = 0;
-    unsigned char pgPrev = 0;
+    signed char selected = -1;
     unsigned char tmp = 0;
     unsigned char tmp2 = 0;
     unsigned char typeSelected = 0;
+    signed char pager = 0;
+    
 
-    // if mouse down, check region
+    // if mouse down...
     if(mouseData == 0)
     {
         // did user click paging tabs?
-        for(tmp=0; tmp < 14; tmp++)
-        {
-            if(mouseYPos > 126 && mouseYPos< 142)
-            {
-                if((mouseYPos == (127 + tmp)) && ((mouseXPos > (8+tmp)) && (mouseXPos < 24))) { 
-                    pgNext = 1;
-                    break;
-                };
-                
-                if((mouseYPos == 127 + tmp) && (mouseXPos > 8 && mouseXPos < (10 + tmp))) { 
-                    pgPrev = 1;
-                    break;
-                };
-            }
-        }
+        pager = clickPagerCheck();
 
-        if (pgNext == 1)
+        if (pager != 0)
         {
-            clearAllFileIcons();
-            curPage++;
+            curPage = curPage + pager;
+            curPage = (curPage == 0 ? maxPage : curPage);
+            curPage = (curPage > maxPage ? 1 : curPage);
+            goPage(curPage);
             updateDirectory();
+            return;
         } 
-        else if (pgPrev == 1)
+
+        // did user click a file icon?
+        selected = clickFileIconCheck();
+
+        if(selected != -1)
         {
-            clearAllFileIcons();
-            curPage--;
-            updateDirectory();
-        } 
-        else 
-        {
-            // file icon selected?
-            for(tmp=0; tmp<8;tmp++)
+            // if icon is already selected, start drag operation
+            if (padIcons[selected].selected == 1)
             {
-                if(IsMseInRegion(&fileIconWindows[tmp]) && fileIconNames[tmp][0] != 0)
+                if(dragMode == 0)
+                    iconBeginDrag(selected);
+                else
+                    iconEndDrag();
+            }
+            else
+            {
+                // select the icon
+                if(isCBMKeyPressed() == TRUE)
+                {
+                    selectFileIcon(selected);
+                }
+                else
                 {
                     unselectAllFileIcons();
-                    selectFileIcon(tmp);
-                    
-                    numSelected=1;
-
-                    // update selected pad header
-                    PutString("  ", 39,64);
-                    PutDecimal(SET_LEFTJUST + SET_SURPRESS, numSelected,  39, 64);
+                    selectFileIcon(selected);
 
                     // check for double click
-                    // $8515 counts down from the applied value to zero every interrupt
-                    dblClickCount = 30; //POKE(0x8515, 30);
-                    while (dblClickCount != 0) //(PEEK(0x8515) != 0)
+                    if(dblClickFileIconCheck() == TRUE)
                     {
-                        if(mouseData == 128)
-                        {
-                            while (dblClickCount != 0) //(PEEK(0x8515) != 0)
-                            {
-                                if(mouseData == 0)
-                                {
-                                    numSelected = 0;
-                                    PutString("  ", 39,64);
-                                    PutDecimal(SET_LEFTJUST + SET_SURPRESS, numSelected,  39, 64);
-
-                                    unselectAllFileIcons();
-                                    
-                                    FindFile(fileIconNames[tmp]);
-                                    loadFileHandle = &dirEntryBuf;
-
-                                    if(loadFileHandle->type == DESK_ACC || loadFileHandle->type == APPLICATION
-                                    || loadFileHandle->type == AUTO_EXEC)
-                                    {
-                                        GetFile(0,fileIconNames[tmp],0,0,0);
-                                    }
-                                    else
-                                    {
-                                        DlgBoxOk("This file can't be opened", "by the deskTop.");
-                                    }
-                                    
-                                    
-                                }
-                                    
-                            }
-
-                        }
-                        
+                        iconHandlerRunApp(selected);
+                        changeDevice(curDrive);
                     }
                 }
             }
+                
+        }        
+        else
+        {
+            iconEndDrag();
+            unselectAllFileIcons();
         }
     }   
     
@@ -118,15 +86,55 @@ void newOtherPressVectorHandler(void)
 
 void newAppMainHandler(void) {
         
+        unsigned char x = 0;
+
         if(system_date.s_minutes != lastMinute)
         {
             updateClock();
             lastMinute = system_date.s_minutes;
         }
-                 
+
+        if(dragMode == 1)
+        {
+            for(x=0;x<8;x++)
+            {
+                if(padIcons[x].selected == 1)
+                {
+                    location.x = mouseXPos-12;
+                    location.y = mouseYPos-10;
+                    PosSprite(1, &location);
+                }
+            }                          
+        } 
+
         oldAppMain();
 }
 
+unsigned char isCBMKeyPressed() 
+{
+    unsigned char x = 0;
 
+    // disable interrupts, switch IO in
+    asm("php");
+    asm("sei");
+    asm("lda $01");
+    asm("pha");
+    asm("lda #$35");
+    asm("sta $01");
+
+    asm("lda #$7f"); // col 7 (%011111111)
+    asm("sta $dc00");
+    asm("lda $dc01");
+    asm("and #$20"); // mask row 5 (%00100000)
+
+    x = __A__;
+    
+    // restore GEOS kernal
+    asm("pla");
+    asm("sta $01");
+    asm("plp");
+
+    return (x == 0 ? TRUE : FALSE);
+}
 
 
